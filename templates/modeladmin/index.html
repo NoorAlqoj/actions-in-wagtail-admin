@@ -1,15 +1,16 @@
 {% extends "wagtailadmin/base.html" %}
-{% load i18n admin_list modeladmin_tags wagtailadmin_tags %}
+{% load i18n admin_list modeladmin_tags wagtailadmin_tags static %}
 {% block titletag %}{{ view.get_meta_title }}{% endblock %}
 
 {% block css %}
     {{ block.super }}
-    {{ view.media.css }}
+    {{ media.css }}
 {% endblock %}
 
 {% block extra_js %}
     {{ block.super }}
-    {{ view.media.js }}
+    {{ media.js }}
+
 {% endblock %}
 
 {% block content %}

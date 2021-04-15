@@ -14,6 +14,7 @@ make_empty.short_description =('Mark selected lastName as empty')
 
 class EmployeeAdmin(admin.ModelAdmin):
     list_display = ["fname","lname"]
+    list_per_page = 3
     actions = [make_empty]
     
 admin.site.register(Employee,EmployeeAdmin)   
@@ -31,7 +32,9 @@ class EmployeeAdmin(ModelAdmin):
     model = Employee
     list_display = ["fname","lname"]
     actions = [make_empty]
+    list_per_page = 3
     
+    index_view_extra_js = []
     action_form = helpers.ActionForm
     actions_selection_counter = True
     
@@ -101,7 +104,6 @@ class EmployeeAdmin(ModelAdmin):
         # Add actions from this ModelAdmin.
         actions.extend(base_actions)
         return actions    
-    
     def get_actions(self, request):
         """
         Return a dictionary mapping the names of all actions for this
@@ -118,6 +120,7 @@ class EmployeeAdmin(ModelAdmin):
         return {name: (func, name, desc) for func, name, desc in actions}
 
     def index_view(self, request):
+
         response = super().index_view(request)
         from django.contrib.admin.views.main import ERROR_FLAG
         opts = self.model._meta
@@ -132,6 +135,7 @@ class EmployeeAdmin(ModelAdmin):
       
         action_failed = False
         selected = request.POST.getlist(helpers.ACTION_CHECKBOX_NAME)
+ 
         actions = self.get_actions(request)
         
        
@@ -169,7 +173,26 @@ class EmployeeAdmin(ModelAdmin):
         # for the changelist given all the fields to be edited. Then we'll
         # use the formset to validate/process POSTed data.
         # formset = cl.formset = None
-
+        from django.conf import settings
+        from django.forms import forms
+        extra = '' if settings.DEBUG else '.min'
+        response.context_data["media"] = forms.Media(
+        js = [
+            # 'js/prototype.js',
+            'admin/js/vendor/jquery/jquery%s.js'% extra,
+            'admin/js/jquery.init.js',
+            'admin/js/core.js',
+            'admin/js/admin/RelatedObjectLookups.js',
+            
+            'admin/js/actions%s.js'% extra ,
+            'admin/js/urlify.js',
+            'admin/js/prepopulate%s.js'% extra,
+            'admin/js/vendor/xregexp/xregexp%s.js'% extra,
+            
+            
+        ]
+        )
+        # response.context_data["media"] = forms.Media(js=['admin/js/%s' % url for url in js])
 
         # Build the action form and populate it with available actions.
         if actions:
@@ -206,6 +229,42 @@ class EmployeeAdmin(ModelAdmin):
         ## review  
         # response.context_data = context  
         
+        # calculate result_count and result_list
+        
+        from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+        self.page_num = int(request.GET.get('p', 0))
+ 
+        paginator = Paginator(self.get_queryset(request), self.list_per_page) 
+        result_count = paginator.count
+        
+        
+        try:
+            result_list = paginator.page((self.page_num + 1)).object_list
+        except PageNotAnInteger:
+            # If page is not an integer, deliver first page.
+            result_list = paginator.page(1).object_list
+        except EmptyPage:
+            # If page is out of range (e.g. 9999), deliver last page of results.
+            result_list = paginator.page(self.page_num + 1).object_list
+        
+        # cl=dict()
+        # cl['result_count'] = result_count
+        # cl['result_list'] = result_list
+        cl = {
+            'result_count' : result_count ,
+            'result_list' : result_list
+        }
+            
+        # 'selection_note': _('0 of %(cnt)s selected') % {'cnt': len(cl.result_list)},
+        # 'selection_note_all': selection_note_all % {'total_count': cl.result_count},
+        from django.utils.translation import gettext as _, ngettext
+
+        selection_note_all = ngettext('%(total_count)s selected','All %(total_count)s selected',cl['result_count'])
+        response.context_data['module_name'] = str(opts.verbose_name_plural)
+        response.context_data['selection_note'] = '0 of %(cnt)s selected' % {'cnt': len(cl["result_list"])},
+        response.context_data['selection_note_all'] = selection_note_all % {'total_count': cl["result_count"]},
+        response.context_data['cl'] = cl
         response.context_data['opts'] = opts
         response.context_data['action_form'] = action_form 
         response.context_data['actions_selection_counter'] = self.actions_selection_counter
