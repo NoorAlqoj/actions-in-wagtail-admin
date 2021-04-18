@@ -4,47 +4,71 @@ from wagtail.contrib.modeladmin.options import (
     ModelAdminGroup,
     modeladmin_register,
 )
- 
-from .models import Employee
-
-def make_empty(modeladmin, request, queryset):
-    queryset.update(lname='')
-
-make_empty.short_description =('Mark selected lastName as empty')    
-
-class EmployeeAdmin(admin.ModelAdmin):
-    list_display = ["fname","lname"]
-    list_per_page = 3
-    actions = [make_empty]
-    
-admin.site.register(Employee,EmployeeAdmin)   
- 
+from django.conf import settings
+from django.forms import forms
+from django.contrib import admin, messages
+from django.utils.translation import gettext as _, ngettext
+from django.contrib.admin.utils import get_deleted_objects
+from django.http.response import (
+    HttpResponseBase,
+    HttpResponseNotAllowed,
+    HttpResponseRedirect,
+)
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.utils.safestring import mark_safe
 from django.contrib.admin import helpers
 from django.db import models
 from django.contrib.admin.utils import model_format_dict
+from django.http.response import HttpResponseBase
+from django.http import HttpResponseRedirect
+from django.contrib.admin.views.main import ERROR_FLAG
+
+from .models import Employee
+
+
+def make_empty(modeladmin, request, queryset):
+    queryset.update(lname="")
+
+
+make_empty.short_description = "Mark selected lastName as empty"
+
+
+class EmployeeAdmin(admin.ModelAdmin):
+    list_display = ["fname", "lname"]
+    list_filter = ["fname"]
+
+    actions = [make_empty]
+
+
+admin.site.register(Employee, EmployeeAdmin)
+
 
 class IncorrectLookupParameters(Exception):
     pass
 
+
 @modeladmin_register
 class EmployeeAdmin(ModelAdmin):
     model = Employee
-    list_display = ["fname","lname"]
+    list_display = ["fname", "lname"]
     actions = [make_empty]
-    list_per_page = 3
-    
-    index_view_extra_js = []
+  
+
+    list_display = ["action_checkbox", *list_display]
     action_form = helpers.ActionForm
     actions_selection_counter = True
-    
+    media = None
+    delete_selected_confirmation_template = "modeladmin/delete.html"
     # the methods below is copied from django/contrib/admin/options.py
     def action_checkbox(self, obj):
         """
         A list_display column containing a checkbox widget.
         """
         return helpers.checkbox.render(helpers.ACTION_CHECKBOX_NAME, str(obj.pk))
-    action_checkbox.short_description = mark_safe('<input type="checkbox" id="action-toggle">')
+
+    action_checkbox.short_description = mark_safe(
+        '<input type="checkbox" id="action-toggle">'
+    )
 
     def get_action_choices(self, request, default_choices=models.BLANK_CHOICE_DASH):
         """
@@ -81,10 +105,10 @@ class EmployeeAdmin(ModelAdmin):
             except KeyError:
                 return None
 
-        if hasattr(func, 'short_description'):
+        if hasattr(func, "short_description"):
             description = func.short_description
         else:
-            description = capfirst(action.replace('_', ' '))
+            description = capfirst(action.replace("_", " "))
         return func, action, description
 
     def _get_base_actions(self):
@@ -99,11 +123,12 @@ class EmployeeAdmin(ModelAdmin):
         for (name, func) in self.admin_site.actions:
             if name in base_action_names:
                 continue
-            description = getattr(func, 'short_description', name.replace('_', ' '))
+            description = getattr(func, "short_description", name.replace("_", " "))
             actions.append((func, name, description))
         # Add actions from this ModelAdmin.
         actions.extend(base_actions)
-        return actions    
+        return actions
+
     def get_actions(self, request):
         """
         Return a dictionary mapping the names of all actions for this
@@ -111,56 +136,168 @@ class EmployeeAdmin(ModelAdmin):
         """
         # If self.actions is set to None that means actions are disabled on
         # this page.
-        if self.actions is None :# or IS_POPUP_VAR in request.GET:
-    
+        if self.actions is None or '_popup' in request.GET:
+
             return {}
 
         # actions = self._filter_actions_by_permissions(request, self._get_base_actions())
         actions = self._get_base_actions()
         return {name: (func, name, desc) for func, name, desc in actions}
 
-    def index_view(self, request):
+    def get_deleted_objects(self, objs, request):
+        """
+        Hook for customizing the delete process for the delete view and the
+        "delete selected" action.
+        """
+        return get_deleted_objects(objs, request, self.admin_site)
 
+    def response_action(self, request, queryset):
+        """
+        Handle an admin action. This is called if a request is POSTed to the
+        changelist; it returns an HttpResponse if the action was handled, and
+        None otherwise.
+        """
+
+        # There can be multiple action forms on the page (at the top
+        # and bottom of the change list, for example). Get the action
+        # whose button was pushed.
+        try:
+            action_index = int(request.POST.get("index", 0))
+        except ValueError:
+            action_index = 0
+
+        # Construct the action form.
+        data = request.POST.copy()
+        data.pop(helpers.ACTION_CHECKBOX_NAME, None)
+        data.pop("index", None)
+
+        # Use the action whose button was pushed
+        try:
+            data.update({"action": data.getlist("action")[action_index]})
+        except IndexError:
+            # If we didn't get an action from the chosen form that's invalid
+            # POST data, so by deleting action it'll fail the validation check
+            # below. So no need to do anything here
+            pass
+
+        action_form = self.action_form(data, auto_id=None)
+        action_form.fields["action"].choices = self.get_action_choices(request)
+
+        # If the form's valid we can handle the action.
+        if action_form.is_valid():
+            action = action_form.cleaned_data["action"]
+            select_across = action_form.cleaned_data["select_across"]
+            func = self.get_actions(request)[action][0]
+
+            # Get the list of selected PKs. If nothing's selected, we can't
+            # perform an action on it, so bail. Except we want to perform
+            # the action explicitly on all objects.
+            selected = request.POST.getlist(helpers.ACTION_CHECKBOX_NAME)
+
+            if not selected and not select_across:
+                # Reminder that something needs to be selected or nothing will happen
+                msg = _(
+                    "Items must be selected in order to perform "
+                    "actions on them. No items have been changed."
+                )
+                messages.warning(request, msg)
+                return None
+
+            if not select_across:
+                # Perform the action only on the selected objects
+                queryset = queryset.filter(pk__in=selected)
+
+            response = func(self, request, queryset)
+
+            # Actions may return an HttpResponse-like object, which will be
+            # used as the response from the POST. If not, we'll be a good
+            # little HTTP citizen and redirect back to the changelist page.
+
+            if isinstance(response, HttpResponseBase):
+                return response
+            else:
+
+                return HttpResponseRedirect(request.get_full_path())
+        else:
+            msg = _("No action selected.")
+            messages.success(request, msg)
+            # self.message_user(request, msg, messages.WARNING)
+            return None
+    # changelist_view in options.py 
+    def index_view(self, request):
         response = super().index_view(request)
-        from django.contrib.admin.views.main import ERROR_FLAG
         opts = self.model._meta
         app_label = opts.app_label
 
-     
-        if self.get_actions(request):
-            if not 'action_checkbox' in self.list_display:
-                self.list_display = ['action_checkbox', *self.list_display]
-       
-        
-      
+        # if not self.has_view_or_change_permission(request):
+        #     raise PermissionDenied
+
+        model_name = self.model.__name__.lower()
+        if not request.user.has_perms(model_name + ".can_delete_" + model_name):
+            messages.error(request, _("No permission."))
+            return http.HttpResponse("FAIL, no permission.")
+        try:
+            cl = self
+        except IncorrectLookupParameters:
+            # Wacky lookup parameters were given, so redirect to the main
+            # changelist page, without parameters, and pass an 'invalid=1'
+            # parameter via the query string. If wacky parameters were given
+            # and the 'invalid=1' parameter was already in the query string,
+            # something is screwed up with the database, so display an error
+            # page.
+            if ERROR_FLAG in request.GET:
+                # needs to be reviwed
+                return SimpleTemplateResponse(
+                    "admin/invalid_setup.html", {"title": _("Database error")}
+                )
+            return HttpResponseRedirect(request.path + "?" + ERROR_FLAG + "=1")
+
+        # If the request was POSTed, this might be a bulk action or a bulk
+        # edit. Try to look up an action or confirmation first, but if this
+        # isn't an action the POST will fall through to the bulk edit check,
+        # below.
+
         action_failed = False
         selected = request.POST.getlist(helpers.ACTION_CHECKBOX_NAME)
- 
         actions = self.get_actions(request)
-        
-       
+
         # Actions with no confirmation
-        if (actions and request.method == 'POST' and
-                'index' in request.POST and '_save' not in request.POST):
+        if (
+            actions
+            and request.method == "POST"
+            and "index" in request.POST
+            and "_save" not in request.POST
+        ):
             if selected:
-                response = self.response_action(request, queryset=cl.get_queryset(request))
+                response = self.response_action(
+                    request, queryset=cl.get_queryset(request)
+                )
                 if response:
                     return response
                 else:
                     action_failed = True
             else:
-                msg = _("Items must be selected in order to perform "
-                        "actions on them. No items have been changed.")
-                self.message_user(request, msg, messages.WARNING)
+                msg = _(
+                    "Items must be selected in order to perform "
+                    "actions on them. No items have been changed."
+                )
+                messages.success(request, msg)
                 action_failed = True
         # Actions with confirmation
-        if (actions and request.method == 'POST' and
-                helpers.ACTION_CHECKBOX_NAME in request.POST and
-                'index' not in request.POST and '_save' not in request.POST):
+        if (
+            actions
+            and request.method == "POST"
+            and helpers.ACTION_CHECKBOX_NAME in request.POST
+            and "index" not in request.POST
+            and "_save" not in request.POST
+        ):
             if selected:
-                response = self.response_action(request, queryset=cl.get_queryset(request))
+                response = self.response_action(
+                    request, queryset=cl.get_queryset(request)
+                )
                 if response:
                     return response
+                
                 else:
                     action_failed = True
 
@@ -173,72 +310,47 @@ class EmployeeAdmin(ModelAdmin):
         # for the changelist given all the fields to be edited. Then we'll
         # use the formset to validate/process POSTed data.
         # formset = cl.formset = None
-        from django.conf import settings
-        from django.forms import forms
-        extra = '' if settings.DEBUG else '.min'
+
+        if isinstance(response, HttpResponseNotAllowed):
+            print("HttpResponseNotAllowed")
+            response.context_data = {}
+
+        extra = "" if settings.DEBUG else ".min"
         response.context_data["media"] = forms.Media(
-        js = [
-            # 'js/prototype.js',
-            'admin/js/vendor/jquery/jquery%s.js'% extra,
-            'admin/js/jquery.init.js',
-            'admin/js/core.js',
-            'admin/js/admin/RelatedObjectLookups.js',
-            
-            'admin/js/actions%s.js'% extra ,
-            'admin/js/urlify.js',
-            'admin/js/prepopulate%s.js'% extra,
-            'admin/js/vendor/xregexp/xregexp%s.js'% extra,
-            
-            
-        ]
+            js=[
+                "admin/js/vendor/jquery/jquery%s.js" % extra,
+                "admin/js/jquery.init.js",
+                "admin/js/core.js",
+                "admin/js/admin/RelatedObjectLookups.js",
+                "admin/js/actions%s.js" % extra,
+                "admin/js/urlify.js",
+                "admin/js/prepopulate%s.js" % extra,
+                "admin/js/vendor/xregexp/xregexp%s.js" % extra,
+            ]
         )
+        self.media = response.context_data["media"]
         # response.context_data["media"] = forms.Media(js=['admin/js/%s' % url for url in js])
 
         # Build the action form and populate it with available actions.
         if actions:
+
             action_form = self.action_form(auto_id=None)
-            action_form.fields['action'].choices = self.get_action_choices(request)
+            action_form.fields["action"].choices = self.get_action_choices(request)
+
+            response.context_data["media"] = (
+                response.context_data["media"] + action_form.media
+            )
             # media += action_form.media
         else:
             action_form = None
-        # selection_note_all = ngettext(
-        #     '%(total_count)s selected',
-        #     'All %(total_count)s selected',
-        #     cl.result_count
-        # )
-        # context = {
-        #     **self.admin_site.each_context(request),
-        #     'module_name': str(opts.verbose_name_plural),
-        #     # 'selection_note': _('0 of %(cnt)s selected') % {'cnt': len(cl.result_list)},
-        #     # 'selection_note_all': selection_note_all % {'total_count': cl.result_count},
-        #     'title': cl.title,
-        #     'is_popup': cl.is_popup,
-        #     'to_field': cl.to_field,
-        #     # 'cl': cl,
-        #     'media': media,
-        #     'has_add_permission': self.has_add_permission(request),
-        #     'opts': cl.opts,
-        #     'action_form': action_form,
-        #     'actions_on_top': self.actions_on_top,
-        #     'actions_on_bottom': self.actions_on_bottom,
-        #     'actions_selection_counter': self.actions_selection_counter,
-        #     'preserved_filters': self.get_preserved_filters(request),
-        #     **(extra_context or {}),
-        # }        
-        
-        ## review  
-        # response.context_data = context  
-        
-        # calculate result_count and result_list
-        
-        from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 
-        self.page_num = int(request.GET.get('p', 0))
- 
-        paginator = Paginator(self.get_queryset(request), self.list_per_page) 
+        # calculate result_count and result_list
+
+        self.page_num = int(request.GET.get("p", 0))
+
+        paginator = Paginator(self.get_queryset(request), self.list_per_page)
         result_count = paginator.count
-        
-        
+
         try:
             result_list = paginator.page((self.page_num + 1)).object_list
         except PageNotAnInteger:
@@ -247,26 +359,32 @@ class EmployeeAdmin(ModelAdmin):
         except EmptyPage:
             # If page is out of range (e.g. 9999), deliver last page of results.
             result_list = paginator.page(self.page_num + 1).object_list
-        
-        # cl=dict()
-        # cl['result_count'] = result_count
-        # cl['result_list'] = result_list
-        cl = {
-            'result_count' : result_count ,
-            'result_list' : result_list
-        }
-            
-        # 'selection_note': _('0 of %(cnt)s selected') % {'cnt': len(cl.result_list)},
-        # 'selection_note_all': selection_note_all % {'total_count': cl.result_count},
-        from django.utils.translation import gettext as _, ngettext
 
-        selection_note_all = ngettext('%(total_count)s selected','All %(total_count)s selected',cl['result_count'])
-        response.context_data['module_name'] = str(opts.verbose_name_plural)
-        response.context_data['selection_note'] = '0 of %(cnt)s selected' % {'cnt': len(cl["result_list"])},
-        response.context_data['selection_note_all'] = selection_note_all % {'total_count': cl["result_count"]},
-        response.context_data['cl'] = cl
-        response.context_data['opts'] = opts
-        response.context_data['action_form'] = action_form 
-        response.context_data['actions_selection_counter'] = self.actions_selection_counter
-        return response
+        # cl = {"result_count": result_count, "result_list": result_list}
         
+        cl = {
+            'result_count':result_count,
+            'result_list':result_list
+        }
+        
+        selection_note_all = ngettext(
+            '%(total_count)s selected',
+            'All %(total_count)s selected',
+            cl["result_count"]
+        )
+    
+        response.context_data["module_name"] = str(opts.verbose_name_plural)
+        response.context_data["selection_note"] = _(
+            "0 of %(cnt)s selected" % {"cnt": len(cl["result_list"])},
+        )
+        response.context_data['selection_note_all'] = _(
+            selection_note_all % {'total_count': cl["result_count"]},
+        )
+        response.context_data["cl"] = cl
+        response.context_data["opts"] = opts
+        response.context_data["action_form"] = action_form
+        response.context_data[
+            "actions_selection_counter"
+        ] = self.actions_selection_counter
+        
+        return response

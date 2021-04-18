@@ -1,3 +1,4 @@
+//this file is found in admin/jsi18n
 (function (globals) {
   var django = globals.django || (globals.django = {});
 
