@@ -310,9 +310,10 @@ class EmployeeAdmin(ModelAdmin):
         # for the changelist given all the fields to be edited. Then we'll
         # use the formset to validate/process POSTed data.
         # formset = cl.formset = None
-
+        
+        # needs to be reviewed
         if isinstance(response, HttpResponseNotAllowed):
-            print("HttpResponseNotAllowed")
+            # print("HttpResponseNotAllowed")
             response.context_data = {}
 
         extra = "" if settings.DEBUG else ".min"
